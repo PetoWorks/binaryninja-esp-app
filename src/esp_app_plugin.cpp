@@ -7,13 +7,13 @@ using namespace BinaryNinja;
 
 extern "C"
 {
-    BN_DECLARE_CORE_ABI_VERSION
+	BN_DECLARE_CORE_ABI_VERSION
 
-    BINARYNINJAPLUGIN bool CorePluginInit()
-    {
-        BinaryNinja::LogInfo("ESP-APP View Plugin loaded");
-        EspApp::InitializeChips();
-        EspApp::InitEspAppViewType();
-        return true;
-    }
+	BINARYNINJAPLUGIN bool CorePluginInit()
+	{
+		BinaryNinja::LogInfo("ESP-APP View Plugin loaded");
+		EspApp::InitializeChips();
+		EspApp::InitEspAppViewType();
+		return true;
+	}
 }
