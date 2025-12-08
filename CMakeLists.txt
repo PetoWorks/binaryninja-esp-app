@@ -15,7 +15,6 @@ add_library(view_esp_app SHARED
     src/esp_app_plugin.cpp
     src/esp_app_view_type.cpp
     src/esp_app_view.cpp
-    src/esp_app_workflows.cpp
     src/esp32.cpp
 )
 
