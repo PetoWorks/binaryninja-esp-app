@@ -1,6 +1,8 @@
 #include "esp_app_view.h"
 #include "esp32.h"
 
+#include <algorithm>
+
 using namespace std;
 using namespace BinaryNinja;
 
@@ -132,6 +134,16 @@ namespace EspApp
 			return false;
 		}
 
+		// Step 1: Validate all app segments and map them to regions
+		// Each app segment must be fully contained within exactly one region
+		struct AppSegmentMapping
+		{
+			size_t segmentIndex;
+			const SegmentInfo* segment;
+			const MemoryRegion* region;
+		};
+		vector<AppSegmentMapping> appSegmentMappings;
+
 		for (size_t i = 0; i < m_segments.size(); i++)
 		{
 			const auto& seg = m_segments[i];
@@ -142,32 +154,121 @@ namespace EspApp
 
 			if (!region)
 			{
-				m_logger->LogWarn(
-					"Segment %zu at 0x%08x is not in any known memory region, skipping", i, seg.load_addr);
-				continue;
+				m_logger->LogError(
+					"Segment %zu at 0x%08x is not in any known memory region", i, seg.load_addr);
+				return false;
 			}
 
+			// Check if segment end is within the same region
 			if (seg_end > region->end_addr)
 			{
-				m_logger->LogWarn("Segment %zu at 0x%08x-0x%08llx exceeds region %s boundary (0x%08llx), skipping", i,
-					seg.load_addr, seg_end, region->name, region->end_addr);
-				continue;
+				// Check if segment spans multiple regions
+				const MemoryRegion* endRegion = FindRegionForAddress(m_chipAttr, seg_end - 1);
+				if (endRegion && endRegion != region)
+				{
+					m_logger->LogError(
+						"Segment %zu at 0x%08x-0x%08llx spans multiple regions (%s and %s)",
+						i, seg.load_addr, seg_end, region->name, endRegion->name);
+				}
+				else
+				{
+					m_logger->LogError(
+						"Segment %zu at 0x%08x-0x%08llx exceeds region %s boundary (0x%08llx-0x%08llx)",
+						i, seg.load_addr, seg_end, region->name, region->start_addr, region->end_addr);
+				}
+				return false;
 			}
 
-			m_logger->LogDebug("Segment %zu: name=%s addr=0x%08x, len=0x%x, offset=0x%llx", i, region->name,
-				seg.load_addr, seg.data_len, seg.file_offset);
+			m_logger->LogDebug("Segment %zu: region=%s addr=0x%08x, len=0x%x, offset=0x%llx",
+				i, region->name, seg.load_addr, seg.data_len, seg.file_offset);
 
-			AddAutoSegment(seg.load_addr, seg.data_len, seg.file_offset, seg.data_len, region->flags);
-
-			BNSectionSemantics semantics =
-				(region->flags & SegmentContainsCode) ? ReadOnlyCodeSectionSemantics : DefaultSectionSemantics;
-
-			string sectionName = "app." + to_string(i);
-			AddAutoSection(sectionName, seg.load_addr, seg.data_len, semantics);
+			appSegmentMappings.push_back({i, &seg, region});
 		}
 
+		// Step 2: Process each region - add file-backed segments and fragment remainders
+		for (size_t regionIdx = 0; regionIdx < m_chipAttr->region_count; regionIdx++)
+		{
+			const auto& region = m_chipAttr->regions[regionIdx];
+
+			// Collect all app segments that belong to this region, sorted by address
+			vector<const AppSegmentMapping*> regionAppSegments;
+			for (const auto& mapping : appSegmentMappings)
+			{
+				if (mapping.region == &region)
+				{
+					regionAppSegments.push_back(&mapping);
+				}
+			}
+
+			// Sort by load address
+			sort(regionAppSegments.begin(), regionAppSegments.end(),
+				[](const AppSegmentMapping* a, const AppSegmentMapping* b) {
+					return a->segment->load_addr < b->segment->load_addr;
+				});
+
+			BNSectionSemantics semantics =
+				(region.flags & SegmentContainsCode) ? ReadOnlyCodeSectionSemantics : DefaultSectionSemantics;
+
+			if (regionAppSegments.empty())
+			{
+				// No app segments in this region - add entire region as non-file-backed
+				uint64_t regionSize = region.end_addr - region.start_addr;
+				AddAutoSegment(region.start_addr, regionSize, 0, 0, region.flags);
+				AddAutoSection(region.name, region.start_addr, regionSize, semantics);
+				m_logger->LogDebug("Region %s: added as non-file-backed (0x%08llx-0x%08llx)",
+					region.name, region.start_addr, region.end_addr);
+			}
+			else
+			{
+				// Region has app segments - fragment the region
+				uint64_t currentAddr = region.start_addr;
+				size_t fragmentIndex = 0;
+
+				for (const auto* mapping : regionAppSegments)
+				{
+					const auto& seg = *mapping->segment;
+					uint64_t seg_start = seg.load_addr;
+					uint64_t seg_end = seg.load_addr + seg.data_len;
+
+					// Add non-file-backed fragment before this app segment (if any gap)
+					if (currentAddr < seg_start)
+					{
+						uint64_t gapSize = seg_start - currentAddr;
+						AddAutoSegment(currentAddr, gapSize, 0, 0, region.flags);
+
+						string sectionName = string(region.name) + ".frag." + to_string(fragmentIndex++);
+						AddAutoSection(sectionName, currentAddr, gapSize, semantics);
+						m_logger->LogDebug("Region %s: added fragment at 0x%08llx-0x%08llx (non-file-backed)",
+							region.name, currentAddr, seg_start);
+					}
+
+					// Add the file-backed app segment
+					AddAutoSegment(seg.load_addr, seg.data_len, seg.file_offset, seg.data_len, region.flags);
+
+					string sectionName = string(region.name) + ".app." + to_string(mapping->segmentIndex);
+					AddAutoSection(sectionName, seg.load_addr, seg.data_len, semantics);
+					m_logger->LogDebug("Region %s: added app segment %zu at 0x%08x-0x%08llx (file-backed)",
+						region.name, mapping->segmentIndex, seg.load_addr, seg_end);
+
+					currentAddr = seg_end;
+				}
+
+				// Add non-file-backed fragment after the last app segment (if any remainder)
+				if (currentAddr < region.end_addr)
+				{
+					uint64_t remainderSize = region.end_addr - currentAddr;
+					AddAutoSegment(currentAddr, remainderSize, 0, 0, region.flags);
+
+					string sectionName = string(region.name) + ".frag." + to_string(fragmentIndex);
+					AddAutoSection(sectionName, currentAddr, remainderSize, semantics);
+					m_logger->LogDebug("Region %s: added fragment at 0x%08llx-0x%08llx (non-file-backed)",
+						region.name, currentAddr, region.end_addr);
+				}
+			}
+		}
+
+		// Step 3: Set up architecture and platform
 		std::string archName;
-		EspChipId chipId = static_cast<EspChipId>(m_header.chip_id);
 
 		Ref<Settings> settings = GetLoadSettings(GetTypeName());
 		if (settings && settings->Contains("loader.esp.architecture"))
