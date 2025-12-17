@@ -1,4 +1,6 @@
-.DS_Store
 .vscode/
+.vscodium/
 .cache/
+.DS_Store
 build/
+CLAUDE.md
