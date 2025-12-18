@@ -18,7 +18,17 @@ add_library(view_esp_app SHARED
     src/esp32.cpp
 )
 
-target_link_libraries(view_esp_app binaryninjaapi)
+if(WIN32)
+    get_target_property(BN_API_SOURCE_DIR binaryninjaapi SOURCE_DIR)
+    list(APPEND CMAKE_MODULE_PATH "${BN_API_SOURCE_DIR}/cmake")
+    find_package(BinaryNinjaCore REQUIRED)
+    target_link_libraries(view_esp_app 
+        ${BinaryNinjaCore_LIBRARIES}
+        binaryninjaapi)
+    target_link_directories(view_esp_app PRIVATE ${BinaryNinjaCore_LIBRARY_DIRS})
+else()
+    target_link_libraries(view_esp_app binaryninjaapi)
+endif()
 
 set_target_properties(view_esp_app PROPERTIES
     CXX_STANDARD 20
