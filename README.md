@@ -14,6 +14,7 @@ $ mkdir build
 $ cmake -S . -B build -D BN_API_PATH="$(realpath ../binaryninja-api)" -D BN_INSTALL_DIR="<PATH_TO>/binaryninja"
 $ cmake --build build
 $ ln -sf "$(realpath ./build/libview_esp_app.so)" "$HOME/.binaryninja/plugins/libview_esp_app.so"
+```
 
 **Build (macOS)**
 ```
